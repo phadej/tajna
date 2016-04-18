@@ -1,0 +1,7 @@
+resolver: lts-5.13
+packages:
+- '.'
+extra-deps:
+- optparse-applicative-0.12.1.0
+flags: {}
+extra-package-dbs: []

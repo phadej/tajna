@@ -1,0 +1,42 @@
+name: tajna
+version: 0.0.0.0
+synopsis: Local 12factor environments.
+description: |
+  Run your 12factor apps locally.
+  .
+  @
+  tajna run
+  @
+author: Oleg Grenrus <oleg.grenrus@iki.fi>
+maintainer: Oleg Grenrus <oleg.grenrus@iki.fi>
+license: BSD3
+github: phadej/tajna
+category: Development
+tested-with: GHC==7.10.3
+extra-source-files:
+- README.md
+
+ghc-options: -Wall
+
+dependencies:
+- base >=4.7 && <4.9
+- base-compat
+- Cabal
+- aeson
+- bytestring
+- directory
+- exceptions
+- lens
+- optparse-applicative
+- process
+- regex-applicative-text
+- text
+- transformers
+- unordered-containers
+- vector
+- yaml >=0.8.14
+
+executables:
+  tajna:
+    main: Main.hs
+    source-dirs: src
