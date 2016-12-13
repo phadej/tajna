@@ -29,6 +29,7 @@ dependencies:
 - lens
 - optparse-applicative
 - process
+- process-extras
 - regex-applicative-text
 - text
 - transformers

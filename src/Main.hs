@@ -2,11 +2,11 @@
 {-# LANGUAGE TemplateHaskell   #-}
 module Main (main) where
 
-import Prelude        ()
+import Prelude ()
 import Prelude.Compat
-
-import Control.Applicative        (many, optional, some)
-import Control.Lens               (makeLenses, (^.))
+import Control.Applicative        (many, optional, some, (<|>))
+import Control.Lens
+       (at, forOf_, makeLenses, (%~), (&), (.~), (^.))
 import Control.Monad              (void)
 import Control.Monad.IO.Class     (MonadIO (..))
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
@@ -14,15 +14,19 @@ import Data.Aeson                 (FromJSON (..), Value (..), withObject, (.:))
 import Data.Aeson.Types           (typeMismatch)
 import Data.Bifunctor             (bimap)
 import Data.Char                  (isAlpha)
+import Data.Foldable              (for_)
 import Data.HashMap.Strict        (HashMap)
-import Data.List                  (isSuffixOf)
+import Data.List                  (isSuffixOf, sort)
 import Data.Maybe                 (fromMaybe)
 import Data.Monoid                ((<>))
 import Data.Text                  (Text)
-import Data.Yaml                  (decodeFileEither)
+import Data.Text.Lens             (unpacked)
+import Data.Yaml                  (decodeEither', encode)
 import System.Directory           (getDirectoryContents)
 import System.Environment         (getEnv, getEnvironment)
-import System.Exit                (ExitCode (..))
+import System.Exit                (ExitCode (..), exitFailure)
+import System.Exit.Lens           (_ExitFailure)
+import System.IO                  (stderr)
 import System.Process             (createProcess, proc, waitForProcess)
 
 import Text.Regex.Applicative.Text (RE', psym, replace, sym)
@@ -31,11 +35,13 @@ import Distribution.PackageDescription       (GenericPackageDescription (..))
 import Distribution.PackageDescription.Parse (readPackageDescription)
 import Distribution.Verbosity                (normal)
 
-import qualified Data.HashMap.Strict as HM
-import qualified Data.Text           as T
-import qualified Data.Text.IO        as T
-import qualified Options.Applicative as O
-import qualified System.Process      as Process
+import qualified Data.ByteString           as BS
+import qualified Data.HashMap.Strict       as HM
+import qualified Data.Text                 as T
+import qualified Data.Text.IO              as T
+import qualified Options.Applicative       as O
+import qualified System.Process            as Process
+import qualified System.Process.ByteString as ProcessBS
 
 type EnvName = Text
 type Env = HashMap Text EnvValue
@@ -96,6 +102,10 @@ data Opts = Opts
 data Cmd
     = CmdEnv (Maybe EnvName)
     | CmdRun (Maybe EnvName) !UseStack !UseCabal ![String]
+    | CmdInit
+    | CmdListKeys
+    | CmdAddKey Text Text
+    | CmdDeleteKey Text
     deriving (Show)
 
 data UseStack = UseStack | NoStack
@@ -110,8 +120,12 @@ data UseCabal = UseCabal | NoCabal
 
 optsParser :: O.Parser Opts
 optsParser = fmap Opts $ O.subparser $ mconcat
-    [ O.command "env" $ O.info (O.helper <*> cmdEnvParser) $ O.progDesc "Print environment as shell script"
-    , O.command "run" $ O.info (O.helper <*> cmdRunParser) $ O.progDesc "Run command in the environment"
+    [ O.command "env"        $ O.info (O.helper <*> cmdEnvParser) $ O.progDesc "Print environment as shell script"
+    , O.command "run"        $ O.info (O.helper <*> cmdRunParser) $ O.progDesc "Run command in the environment"
+    , O.command "init"       $ O.info (O.helper <*> cmdInitParser) $ O.progDesc "Initialize the secrets file"
+    , O.command "list-keys"  $ O.info (O.helper <*> cmdListKeysParser) $ O.progDesc "List all keys in the secret file"
+    , O.command "add-key"    $ O.info (O.helper <*> cmdAddKeyParser) $ O.progDesc "Add secret key"
+    , O.command "delete-key" $ O.info (O.helper <*> cmdDeleteKeyParser) $ O.progDesc "Delete secret key"
     ]
 
 cmdEnvParser :: O.Parser Cmd
@@ -124,6 +138,21 @@ cmdRunParser = CmdRun
     <*> (O.flag NoStack UseStack $ O.short 's' <> O.long "stack" <> O.help "Use stack exec")
     <*> (O.flag NoCabal UseCabal $ O.short 'c' <> O.long "cabal" <> O.help "Run first executable from cabal file")
     <*> many (O.strArgument $ O.metavar ":command" <> O.help "Command to run")
+
+cmdInitParser :: O.Parser Cmd
+cmdInitParser = pure CmdInit
+
+cmdListKeysParser :: O.Parser Cmd
+cmdListKeysParser = pure CmdListKeys
+
+cmdAddKeyParser :: O.Parser Cmd
+cmdAddKeyParser = CmdAddKey
+    <$> textArgument (O.metavar ":key" <> O.help "secret key")
+    <*> textArgument (O.metavar ":value" <> O.help "secret value")
+
+cmdDeleteKeyParser :: O.Parser Cmd
+cmdDeleteKeyParser = CmdDeleteKey
+    <$> textArgument (O.metavar ":key" <> O.help "secret key")
 
 textArgument :: O.Mod O.ArgumentFields String -> O.Parser Text
 textArgument mods = T.pack <$> O.strArgument mods
@@ -141,6 +170,10 @@ execCmd (Opts cmd) = f $ case cmd of
         execCmdEnv envName
     CmdRun envName useStack useCabal params ->
         execCmdRun envName useStack useCabal params
+    CmdInit        -> execCmdInit
+    CmdListKeys    -> execCmdListKeys
+    CmdAddKey k v  -> execCmdAddKey k v
+    CmdDeleteKey k -> execCmdDeleteKey k
   where
     f :: Tajna () -> IO ()
     f m = do
@@ -167,10 +200,10 @@ execCmdRun envName' useStack useCabal params = do
 
     -- Detect executable name
     (cmd', args') <- case useCabal of
-            UseCabal -> (,) <$> getCabalExecutable <*> pure params
-            NoCabal  -> case params of
-                []    -> error $ "No command specified"
-                (a:b) -> pure (a, b)
+        UseCabal -> (,) <$> getCabalExecutable <*> pure params
+        NoCabal  -> case params of
+            []    -> error $ "No command specified"
+            (a:b) -> pure (a, b)
 
     -- If use stack: prepend `stack exec`
     let (cmd, args) = case useStack of
@@ -180,9 +213,47 @@ execCmdRun envName' useStack useCabal params = do
     -- Run command
     liftIO $ callProcessInEnv cmd args env'
 
+execCmdInit :: Tajna ()
+execCmdInit = writeTajnaSecrets mempty
+
+execCmdListKeys :: Tajna ()
+execCmdListKeys = do
+    secrets <- readTajnaSecrets
+    for_ (sort $ HM.toList secrets) $ \(k, v) ->
+        liftIO $ T.putStrLn $ T.justifyLeft 30 ' ' k <> " : " <> v
+
+execCmdAddKey :: Text -> Text -> Tajna ()
+execCmdAddKey key value = do
+    secrets <- readTajnaSecrets
+    -- we don't overwrite!
+    let secrets' = secrets & at key %~ \old -> old <|> Just value
+    writeTajnaSecrets secrets'
+
+execCmdDeleteKey :: Text -> Tajna ()
+execCmdDeleteKey key = do
+    secrets <- readTajnaSecrets
+    let secrets' = secrets & at key .~ Nothing
+    writeTajnaSecrets secrets'
+
+writeTajnaSecrets :: HashMap Text Text -> Tajna ()
+writeTajnaSecrets secrets = liftIO $ do
+    home      <- getEnv "HOME"
+    identity  <- T.strip <$> T.readFile (home <> "/.tajna/identity")
+    (ec, encrypted, err) <- ProcessBS.readProcessWithExitCode
+        "gpg2" [ "-e", "-r", identity ^. unpacked ] (encode secrets)
+    BS.hPutStr stderr err
+    forOf_ _ExitFailure ec $ \_ -> exitFailure
+    BS.writeFile (home <> "/.tajna/secrets.yaml.encrypted") encrypted
+
+readTajnaSecrets :: Tajna (HashMap Text Text)
+readTajnaSecrets = do
+    home <- liftIO $ getEnv "HOME"
+    identity <- liftIO $ T.readFile $ home <> "/.tajna/identity"
+    decodeFileEitherTajna (Just identity) $ home <> "/.tajna/secrets.yaml.encrypted"
+
 getTajnaEnv :: Maybe EnvName -> Tajna (HashMap Text Text)
 getTajnaEnv envName' = do
-    config <- decodeFileEitherTajna "tajna.yaml"
+    config <- decodeFileEitherTajna Nothing "tajna.yaml"
     let envName = fromMaybe (config ^. configDefEnv) envName'
     case HM.lookup envName (config ^. configEnvs) of
         Nothing  -> error $ "Non-existing environment: " <> T.unpack envName
@@ -201,9 +272,8 @@ getTajnaEnv envName' = do
 
     flattenEnvSecrets :: HashMap k EnvValue -> Tajna (HashMap k Text)
     flattenEnvSecrets env = do
-        home <- liftIO $ getEnv "HOME"
         environtment <- getEnvironment'
-        secrets <- decodeFileEitherTajna $ home <> "/.tajna/secrets.yaml"
+        secrets <- readTajnaSecrets
         traverse (f secrets environtment) env
       where
         f :: HashMap Text Text -> HashMap Text Text -> EnvValue -> Tajna Text
@@ -258,10 +328,19 @@ expandEnvVar hm = replace re
 -- Data.Yaml extras
 -------------------------------------------------------------------------------
 
-decodeFileEitherTajna :: FromJSON a => FilePath -> Tajna a
-decodeFileEitherTajna fp = do
-    e <- liftIO $ decodeFileEither fp
-    either (throwE . InvalidYaml fp . show) pure e
+decodeFileEitherTajna :: FromJSON a => Maybe Text -> FilePath -> Tajna a
+decodeFileEitherTajna midentity fp = do
+    contents <- liftIO $ case midentity of
+        Nothing -> BS.readFile fp
+        Just _identity -> do
+            encrypted <- BS.readFile fp
+            (ec, encoded, err) <- ProcessBS.readProcessWithExitCode
+                "gpg2" ["-d"] encrypted
+            BS.hPutStr stderr err
+            forOf_ _ExitFailure ec $ \_ -> exitFailure
+            pure encoded
+
+    either (throwE . InvalidYaml fp . show) pure (decodeEither' contents)
 
 -------------------------------------------------------------------------------
 -- Cabal stuff
