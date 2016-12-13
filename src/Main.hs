@@ -189,7 +189,7 @@ execCmd (Opts cmd) = f $ case cmd of
 execCmdEnv :: Maybe EnvName -> Tajna ()
 execCmdEnv envName' = do
     env <- getTajnaEnv envName'
-    void $ flip HM.traverseWithKey env $ \k v ->
+    void $ for_ (sort $ HM.toList env) $ \(k, v) ->
         liftIO $ T.putStrLn $ "export " <> k <> "=\"" <> v <> "\""
 
 execCmdRun :: Maybe EnvName -> UseStack -> UseCabal -> [String] -> Tajna ()
