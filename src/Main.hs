@@ -1,24 +1,33 @@
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell   #-}
+#if !MIN_VERSION_aeson(1,0,3)
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+#endif
 module Main (main) where
 
 import Prelude ()
 import Prelude.Compat
 import Control.Applicative        (many, optional, some, (<|>))
+import Control.Monad.Catch          (catch)
 import Control.Lens
-       (at, forOf_, makeLenses, (%~), (&), (.~), (^.))
+       (at, forOf_, makeLenses, (%~), (&), (.~), (^.), _Wrapped)
 import Control.Monad              (void)
 import Control.Monad.IO.Class     (MonadIO (..))
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
-import Data.Aeson                 (FromJSON (..), Value (..), withObject, (.:))
+import Data.Aeson
+       (FromJSON (..), FromJSON1 (..), Value (..), parseJSON1, withObject,
+       (.:))
 import Data.Aeson.Types           (typeMismatch)
 import Data.Bifunctor             (bimap)
 import Data.Char                  (isAlpha)
 import Data.Foldable              (for_)
+import Data.Functor.Identity      (Identity)
 import Data.HashMap.Strict        (HashMap)
 import Data.List                  (isSuffixOf, sort)
 import Data.Maybe                 (fromMaybe)
 import Data.Monoid                ((<>))
+import Data.Proxy                 (Proxy (..))
 import Data.Text                  (Text)
 import Data.Text.Lens             (unpacked)
 import Data.Yaml                  (decodeEither', encode)
@@ -75,18 +84,22 @@ data TajnaError
 -- Config
 -------------------------------------------------------------------------------
 
-data Config = Config
-    { _configDefEnv :: !EnvName
+data Config f = Config
+    { _configDefEnv :: !(f EnvName)
     , _configEnvs   :: !(HashMap EnvName Env)
     }
-    deriving (Show)
 
 makeLenses ''Config
 
-instance FromJSON Config where
+instance FromJSON1 f => FromJSON (Config f) where
     parseJSON = withObject "Confog" $ \obj -> Config
-        <$> obj .: "default"
+        <$> fmap lower1 (obj .: "default")
         <*> obj .: "envs"
+
+data Lift1 f a = Lift1 { lower1 :: f a }
+
+instance (FromJSON1 f, FromJSON a) => FromJSON (Lift1 f a) where
+    parseJSON = fmap Lift1 . parseJSON1
 
 -------------------------------------------------------------------------------
 -- Opts
@@ -253,18 +266,22 @@ readTajnaSecrets = do
 
 getTajnaEnv :: Maybe EnvName -> Tajna (HashMap Text Text)
 getTajnaEnv envName' = do
-    config <- decodeFileEitherTajna Nothing "tajna.yaml"
-    let envName = fromMaybe (config ^. configDefEnv) envName'
-    case HM.lookup envName (config ^. configEnvs) of
+    config <- decodeFileEitherTajna Nothing "tajna.yaml" :: Tajna (Config Identity)
+    local <- decodeFileEitherTajna Nothing "tajna.local.yaml" `catch` defaultLocal
+    let envName = fromMaybe (config ^. configDefEnv . _Wrapped) envName'
+    case config ^. configEnvs . at envName of
         Nothing  -> error $ "Non-existing environment: " <> T.unpack envName
-        Just env -> flattenEnv env
+        Just env -> flattenEnv (HM.union (fromMaybe mempty $ local ^. configEnvs . at envName) env)
   where
+    defaultLocal :: IOError -> Tajna (Config Proxy)
+    defaultLocal _ = pure $ Config Proxy mempty
+
     flattenEnv :: HashMap k EnvValue -> Tajna (HashMap k Text)
     flattenEnv env = do
         environtment <- getEnvironment'
         case traverse (f environtment) env of
             Just env' -> pure env'
-            Nothing -> flattenEnvSecrets env
+            Nothing   -> flattenEnvSecrets env
       where
         f :: HashMap Text Text -> EnvValue -> Maybe Text
         f e (EVPublic t) = Just $ expandEnvVar e t
@@ -366,3 +383,13 @@ getCabalExecutable = do
     cabalFile <- findCabalFile
     exe <- cabalFileFirstExecutable cabalFile
     maybe (throwE $ NoExeInCabal cabalFile) pure exe
+
+-------------------------------------------------------------------------------
+-- Orphans
+-------------------------------------------------------------------------------
+
+#if !MIN_VERSION_aeson(1,0,3)
+instance FromJSON1 Proxy where
+    liftParseJSON _ _ Null = pure Proxy
+    liftParseJSON _ _ v    = typeMismatch "Proxy" v
+#endif
