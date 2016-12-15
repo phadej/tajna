@@ -113,12 +113,15 @@ data Opts = Opts
 -- makeLenses ''Opts
 
 data Cmd
-    = CmdEnv (Maybe EnvName)
-    | CmdRun (Maybe EnvName) !UseStack !UseCabal ![String]
+    = CmdEnv (Maybe EnvName) !UseSecrets
+    | CmdRun (Maybe EnvName) !UseSecrets !UseStack !UseCabal ![String]
     | CmdInit
     | CmdListKeys
     | CmdAddKey Text Text
     | CmdDeleteKey Text
+    deriving (Show)
+
+data UseSecrets = UseSecrets | NoSecrets
     deriving (Show)
 
 data UseStack = UseStack | NoStack
@@ -144,10 +147,12 @@ optsParser = fmap Opts $ O.subparser $ mconcat
 cmdEnvParser :: O.Parser Cmd
 cmdEnvParser = CmdEnv
     <$> optional (textArgument $ O.metavar ":env" <> O.help "Environment name")
+    <*> (O.flag UseSecrets NoSecrets $ O.short 'n' <> O.long "no-secrets" <> O.help "No secrets")
 
 cmdRunParser :: O.Parser Cmd
 cmdRunParser = CmdRun
     <$> optional (textOption $ O.short 'e' <> O.long "env" <> O.metavar ":env" <> O.help "Environment name")
+    <*> (O.flag UseSecrets NoSecrets $ O.short 'n' <> O.long "no-secrets" <> O.help "No secrets")
     <*> (O.flag NoStack UseStack $ O.short 's' <> O.long "stack" <> O.help "Use stack exec")
     <*> (O.flag NoCabal UseCabal $ O.short 'c' <> O.long "cabal" <> O.help "Run first executable from cabal file")
     <*> many (O.strArgument $ O.metavar ":command" <> O.help "Command to run")
@@ -179,10 +184,10 @@ textOption mods = T.pack <$> O.strOption mods
 
 execCmd :: Opts -> IO ()
 execCmd (Opts cmd) = f $ case cmd of
-    CmdEnv envName ->
-        execCmdEnv envName
-    CmdRun envName useStack useCabal params ->
-        execCmdRun envName useStack useCabal params
+    CmdEnv envName useSecrets ->
+        execCmdEnv envName useSecrets
+    CmdRun envName useSecrets useStack useCabal params ->
+        execCmdRun envName useSecrets useStack useCabal params
     CmdInit        -> execCmdInit
     CmdListKeys    -> execCmdListKeys
     CmdAddKey k v  -> execCmdAddKey k v
@@ -199,15 +204,15 @@ execCmd (Opts cmd) = f $ case cmd of
           Left (NoExeInCabal fp)    -> putStrLn $ "ERROR: No executables in cabal file " <> fp
 
 
-execCmdEnv :: Maybe EnvName -> Tajna ()
-execCmdEnv envName' = do
-    env <- getTajnaEnv envName'
+execCmdEnv :: Maybe EnvName -> UseSecrets -> Tajna ()
+execCmdEnv envName' useSecrets = do
+    env <- getTajnaEnv useSecrets envName'
     void $ for_ (sort $ HM.toList env) $ \(k, v) ->
         liftIO $ T.putStrLn $ "export " <> k <> "=\"" <> v <> "\""
 
-execCmdRun :: Maybe EnvName -> UseStack -> UseCabal -> [String] -> Tajna ()
-execCmdRun envName' useStack useCabal params = do
-    env <- getTajnaEnv envName'
+execCmdRun :: Maybe EnvName -> UseSecrets -> UseStack -> UseCabal -> [String] -> Tajna ()
+execCmdRun envName' useSecrets useStack useCabal params = do
+    env <- getTajnaEnv useSecrets envName'
     origEnv <- getEnvironment'
     let env' = bimap T.unpack T.unpack <$> HM.toList (env <> origEnv)
 
@@ -264,8 +269,8 @@ readTajnaSecrets = do
     identity <- liftIO $ T.readFile $ home <> "/.tajna/identity"
     decodeFileEitherTajna (Just identity) $ home <> "/.tajna/secrets.yaml.encrypted"
 
-getTajnaEnv :: Maybe EnvName -> Tajna (HashMap Text Text)
-getTajnaEnv envName' = do
+getTajnaEnv :: UseSecrets -> Maybe EnvName -> Tajna (HashMap Text Text)
+getTajnaEnv useSecrets envName' = do
     config <- decodeFileEitherTajna Nothing "tajna.yaml" :: Tajna (Config Identity)
     local <- decodeFileEitherTajna Nothing "tajna.local.yaml" `catch` defaultLocal
     let envName = fromMaybe (config ^. configDefEnv . _Wrapped) envName'
@@ -278,10 +283,12 @@ getTajnaEnv envName' = do
 
     flattenEnv :: HashMap k EnvValue -> Tajna (HashMap k Text)
     flattenEnv env = do
-        environtment <- getEnvironment'
-        case traverse (f environtment) env of
+        environment <- getEnvironment'
+        case traverse (f environment) env of
             Just env' -> pure env'
-            Nothing   -> flattenEnvSecrets env
+            Nothing   -> case useSecrets of
+                UseSecrets -> flattenEnvSecrets env
+                NoSecrets  -> pure $ HM.mapMaybe (f environment) env
       where
         f :: HashMap Text Text -> EnvValue -> Maybe Text
         f e (EVPublic t) = Just $ expandEnvVar e t
@@ -289,9 +296,9 @@ getTajnaEnv envName' = do
 
     flattenEnvSecrets :: HashMap k EnvValue -> Tajna (HashMap k Text)
     flattenEnvSecrets env = do
-        environtment <- getEnvironment'
+        environment <- getEnvironment'
         secrets <- readTajnaSecrets
-        traverse (f secrets environtment) env
+        traverse (f secrets environment) env
       where
         f :: HashMap Text Text -> HashMap Text Text -> EnvValue -> Tajna Text
         f _ e (EVPublic t) = pure $ expandEnvVar e t
