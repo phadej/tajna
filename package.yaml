@@ -12,7 +12,7 @@ maintainer: Oleg Grenrus <oleg.grenrus@iki.fi>
 license: BSD3
 github: phadej/tajna
 category: Development
-tested-with: GHC==7.10.3
+tested-with: GHC==8.0.1
 extra-source-files:
 - README.md
 
@@ -20,13 +20,15 @@ ghc-options: -Wall
 
 dependencies:
 - base >=4.7 && <4.10
-- base-compat
-- Cabal
 - aeson
+- base-compat
 - bytestring
+- Cabal
 - directory
+- DRBG
 - exceptions
 - lens
+- monadcryptorandom
 - optparse-applicative
 - process
 - process-extras

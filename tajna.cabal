@@ -17,7 +17,7 @@ author:         Oleg Grenrus <oleg.grenrus@iki.fi>
 maintainer:     Oleg Grenrus <oleg.grenrus@iki.fi>
 license:        BSD3
 license-file:   LICENSE
-tested-with:    GHC==7.10.3
+tested-with:    GHC==8.0.1
 build-type:     Simple
 cabal-version:  >= 1.10
 
@@ -35,13 +35,15 @@ executable tajna
   ghc-options: -Wall
   build-depends:
       base >=4.7 && <4.10
-    , base-compat
-    , Cabal
     , aeson
+    , base-compat
     , bytestring
+    , Cabal
     , directory
+    , DRBG
     , exceptions
     , lens
+    , monadcryptorandom
     , optparse-applicative
     , process
     , process-extras

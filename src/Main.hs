@@ -9,12 +9,16 @@ module Main (main) where
 import Prelude ()
 import Prelude.Compat
 import Control.Applicative        (many, optional, some, (<|>))
-import Control.Monad.Catch          (catch)
 import Control.Lens
        (at, forOf_, makeLenses, (%~), (&), (.~), (^.), _Wrapped)
 import Control.Monad              (void)
+import Control.Monad.Catch        (catch)
+import Control.Monad.Catch        (throwM)
+import Control.Monad.CryptoRandom
+       (CRand, GenError, MonadCRandomR (..), evalCRand, newGenIO)
 import Control.Monad.IO.Class     (MonadIO (..))
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
+import Crypto.Random.DRBG         (HmacDRBG)
 import Data.Aeson
        (FromJSON (..), FromJSON1 (..), Value (..), parseJSON1, withObject,
        (.:))
@@ -37,6 +41,7 @@ import System.Exit                (ExitCode (..), exitFailure)
 import System.Exit.Lens           (_ExitFailure)
 import System.IO                  (stderr)
 import System.Process             (createProcess, proc, waitForProcess)
+
 
 import Text.Regex.Applicative.Text (RE', psym, replace, sym)
 
@@ -119,6 +124,7 @@ data Cmd
     | CmdListKeys
     | CmdAddKey Text Text
     | CmdDeleteKey Text
+    | CmdGenPass
     deriving (Show)
 
 data UseSecrets = UseSecrets | NoSecrets
@@ -142,6 +148,7 @@ optsParser = fmap Opts $ O.subparser $ mconcat
     , O.command "list-keys"  $ O.info (O.helper <*> cmdListKeysParser) $ O.progDesc "List all keys in the secret file"
     , O.command "add-key"    $ O.info (O.helper <*> cmdAddKeyParser) $ O.progDesc "Add secret key"
     , O.command "delete-key" $ O.info (O.helper <*> cmdDeleteKeyParser) $ O.progDesc "Delete secret key"
+    , O.command "gen-pass"   $ O.info (O.helper <*> cmdGenPassParser) $ O.progDesc "Generate password using system entropy"
     ]
 
 cmdEnvParser :: O.Parser Cmd
@@ -172,6 +179,9 @@ cmdDeleteKeyParser :: O.Parser Cmd
 cmdDeleteKeyParser = CmdDeleteKey
     <$> textArgument (O.metavar ":key" <> O.help "secret key")
 
+cmdGenPassParser :: O.Parser Cmd
+cmdGenPassParser = pure CmdGenPass
+
 textArgument :: O.Mod O.ArgumentFields String -> O.Parser Text
 textArgument mods = T.pack <$> O.strArgument mods
 
@@ -192,6 +202,7 @@ execCmd (Opts cmd) = f $ case cmd of
     CmdListKeys    -> execCmdListKeys
     CmdAddKey k v  -> execCmdAddKey k v
     CmdDeleteKey k -> execCmdDeleteKey k
+    CmdGenPass     -> execCmdGenPass
   where
     f :: Tajna () -> IO ()
     f m = do
@@ -252,6 +263,24 @@ execCmdDeleteKey key = do
     secrets <- readTajnaSecrets
     let secrets' = secrets & at key .~ Nothing
     writeTajnaSecrets secrets'
+
+execCmdGenPass :: Tajna ()
+execCmdGenPass = liftIO $ generatePassword 32
+  where
+    chars :: String
+    chars = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ "!@#?-_,."
+
+    generatePassword :: Int -> IO ()
+    generatePassword l = do
+        g <- newGenIO :: IO HmacDRBG
+        p <- either throwM pure $ evalCRand (generatePassword' l) $ g
+        putStrLn p
+
+    generatePassword' :: Int -> CRand HmacDRBG GenError String
+    generatePassword' l = sequence $ replicate l (element chars)
+
+    element :: MonadCRandomR e m => [a] -> m a
+    element list = (list !!) <$> getCRandomR (0, length list - 1)
 
 writeTajnaSecrets :: HashMap Text Text -> Tajna ()
 writeTajnaSecrets secrets = liftIO $ do
