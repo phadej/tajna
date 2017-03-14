@@ -21,7 +21,7 @@ import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Crypto.Random.DRBG         (HmacDRBG)
 import Data.Aeson
        (FromJSON (..), FromJSON1 (..), Value (..), parseJSON1, withObject,
-       (.:))
+       (.!=), (.:), (.:?))
 import Data.Aeson.Types           (typeMismatch)
 import Data.Bifunctor             (bimap)
 import Data.Char                  (isAlpha)
@@ -90,8 +90,9 @@ data TajnaError
 -------------------------------------------------------------------------------
 
 data Config f = Config
-    { _configDefEnv :: !(f EnvName)
-    , _configEnvs   :: !(HashMap EnvName Env)
+    { _configDefEnv  :: !(f EnvName)
+    , _configRtsOpts :: !Text
+    , _configEnvs    :: !(HashMap EnvName Env)
     }
 
 makeLenses ''Config
@@ -99,6 +100,7 @@ makeLenses ''Config
 instance FromJSON1 f => FromJSON (Config f) where
     parseJSON = withObject "Confog" $ \obj -> Config
         <$> fmap lower1 (obj .: "default")
+        <*> obj .:? "rtsopts" .!= ""
         <*> obj .: "envs"
 
 data Lift1 f a = Lift1 { lower1 :: f a }
@@ -217,13 +219,13 @@ execCmd (Opts cmd) = f $ case cmd of
 
 execCmdEnv :: Maybe EnvName -> UseSecrets -> Tajna ()
 execCmdEnv envName' useSecrets = do
-    env <- getTajnaEnv useSecrets envName'
+    (env, _) <- getTajnaEnv useSecrets envName'
     void $ for_ (sort $ HM.toList env) $ \(k, v) ->
         liftIO $ T.putStrLn $ "export " <> k <> "=\"" <> v <> "\""
 
 execCmdRun :: Maybe EnvName -> UseSecrets -> UseStack -> UseCabal -> [String] -> Tajna ()
 execCmdRun envName' useSecrets useStack useCabal params = do
-    env <- getTajnaEnv useSecrets envName'
+    (env, rtsopts) <- getTajnaEnv useSecrets envName'
     origEnv <- getEnvironment'
     let env' = bimap T.unpack T.unpack <$> HM.toList (env <> origEnv)
 
@@ -234,10 +236,14 @@ execCmdRun envName' useSecrets useStack useCabal params = do
             []    -> error $ "No command specified"
             (a:b) -> pure (a, b)
 
+    let args'' = case T.words rtsopts of
+            [] -> args'
+            ws -> "+RTS" : map T.unpack ws ++ "-RTS" : args'
+
     -- If use stack: prepend `stack exec`
     let (cmd, args) = case useStack of
-            UseStack -> ("stack", "exec" : "--" : cmd' : args')
-            NoStack  -> (cmd', args')
+            UseStack -> ("stack", "exec" : "--" : cmd' : args'')
+            NoStack  -> (cmd', args'')
 
     -- Run command
     liftIO $ callProcessInEnv cmd args env'
@@ -298,17 +304,19 @@ readTajnaSecrets = do
     identity <- liftIO $ T.readFile $ home <> "/.tajna/identity"
     decodeFileEitherTajna (Just identity) $ home <> "/.tajna/secrets.yaml.encrypted"
 
-getTajnaEnv :: UseSecrets -> Maybe EnvName -> Tajna (HashMap Text Text)
+-- | Get's environment and rts options
+getTajnaEnv :: UseSecrets -> Maybe EnvName -> Tajna (HashMap Text Text, Text)
 getTajnaEnv useSecrets envName' = do
     config <- decodeFileEitherTajna Nothing "tajna.yaml" :: Tajna (Config Identity)
     local <- decodeFileEitherTajna Nothing "tajna.local.yaml" `catch` defaultLocal
     let envName = fromMaybe (config ^. configDefEnv . _Wrapped) envName'
-    case config ^. configEnvs . at envName of
+    env <- case config ^. configEnvs . at envName of
         Nothing  -> error $ "Non-existing environment: " <> T.unpack envName
         Just env -> flattenEnv (HM.union (fromMaybe mempty $ local ^. configEnvs . at envName) env)
+    pure (env, config ^. configRtsOpts)
   where
     defaultLocal :: IOError -> Tajna (Config Proxy)
-    defaultLocal _ = pure $ Config Proxy mempty
+    defaultLocal _ = pure $ Config Proxy mempty mempty
 
     flattenEnv :: HashMap k EnvValue -> Tajna (HashMap k Text)
     flattenEnv env = do
