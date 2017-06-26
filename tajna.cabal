@@ -1,9 +1,5 @@
--- This file has been generated from package.yaml by hpack version 0.15.0.
---
--- see: https://github.com/sol/hpack
-
 name:           tajna
-version:        0.0.0.0
+version:        0
 synopsis:       Local 12factor environments.
 description:    Run your 12factor apps locally.
                 .
@@ -17,7 +13,7 @@ author:         Oleg Grenrus <oleg.grenrus@iki.fi>
 maintainer:     Oleg Grenrus <oleg.grenrus@iki.fi>
 license:        BSD3
 license-file:   LICENSE
-tested-with:    GHC==8.0.1
+tested-with:    GHC==7.10.3, GHC==8.0.2, GHC==8.2.1
 build-type:     Simple
 cabal-version:  >= 1.10
 
@@ -34,8 +30,8 @@ executable tajna
       src
   ghc-options: -Wall
   build-depends:
-      base >=4.7 && <4.10
-    , aeson
+      base >=4.7 && <4.11
+    , aeson >=1.0
     , base-compat
     , bytestring
     , Cabal

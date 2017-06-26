@@ -1,9 +1,6 @@
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell   #-}
-#if !MIN_VERSION_aeson(1,0,3)
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-#endif
 module Main (main) where
 
 import Prelude ()
@@ -48,6 +45,10 @@ import Text.Regex.Applicative.Text (RE', psym, replace, sym)
 import Distribution.PackageDescription       (GenericPackageDescription (..))
 import Distribution.PackageDescription.Parse (readPackageDescription)
 import Distribution.Verbosity                (normal)
+
+#if MIN_VERSION_Cabal(2,0,0)
+import Distribution.Types.UnqualComponentName (unUnqualComponentName)
+#endif
 
 import qualified Data.ByteString           as BS
 import qualified Data.HashMap.Strict       as HM
@@ -418,7 +419,12 @@ cabalFileFirstExecutable :: MonadIO m => FilePath -> m (Maybe String)
 cabalFileFirstExecutable cabalFile = do
     gpd <- liftIO $ readPackageDescription normal cabalFile
     case condExecutables gpd of
-        ((name, _) : _) -> pure $ Just name
+        ((name, _) : _) ->
+#if MIN_VERSION_Cabal(2,0,0)
+            pure $ Just $ unUnqualComponentName name
+#else
+            pure $ Just name
+#endif
         []              -> pure Nothing
 
 
@@ -427,13 +433,3 @@ getCabalExecutable = do
     cabalFile <- findCabalFile
     exe <- cabalFileFirstExecutable cabalFile
     maybe (throwE $ NoExeInCabal cabalFile) pure exe
-
--------------------------------------------------------------------------------
--- Orphans
--------------------------------------------------------------------------------
-
-#if !MIN_VERSION_aeson(1,0,3)
-instance FromJSON1 Proxy where
-    liftParseJSON _ _ Null = pure Proxy
-    liftParseJSON _ _ v    = typeMismatch "Proxy" v
-#endif
