@@ -43,11 +43,13 @@ import System.Process             (createProcess, proc, waitForProcess)
 import Text.Regex.Applicative.Text (RE', psym, replace, sym)
 
 import Distribution.PackageDescription       (GenericPackageDescription (..))
-import Distribution.PackageDescription.Parse (readPackageDescription)
 import Distribution.Verbosity                (normal)
 
 #if MIN_VERSION_Cabal(2,0,0)
 import Distribution.Types.UnqualComponentName (unUnqualComponentName)
+import Distribution.PackageDescription.Parse (readGenericPackageDescription)
+#else
+import Distribution.PackageDescription.Parse (readPackageDescription)
 #endif
 
 import qualified Data.ByteString           as BS
@@ -417,7 +419,11 @@ findCabalFile = do
 
 cabalFileFirstExecutable :: MonadIO m => FilePath -> m (Maybe String)
 cabalFileFirstExecutable cabalFile = do
+#if MIN_VERSION_Cabal(2,0,0)
+    gpd <- liftIO $ readGenericPackageDescription normal cabalFile
+#else
     gpd <- liftIO $ readPackageDescription normal cabalFile
+#endif
     case condExecutables gpd of
         ((name, _) : _) ->
 #if MIN_VERSION_Cabal(2,0,0)
