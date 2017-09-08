@@ -124,7 +124,7 @@ data Opts = Opts
 
 data Cmd
     = CmdEnv (Maybe EnvName) !UseSecrets
-    | CmdRun (Maybe EnvName) !UseSecrets !UseStack !UseCabal ![String]
+    | CmdRun (Maybe EnvName) !UseSecrets !UseStack !UseNewRun !UseCabal ![String]
     | CmdInit
     | CmdListKeys
     | CmdAddKey Text Text
@@ -139,6 +139,9 @@ data UseStack = UseStack | NoStack
     deriving (Show)
 
 data UseCabal = UseCabal | NoCabal
+    deriving (Show)
+
+data UseNewRun = UseNewRun | NoNewRun
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -166,6 +169,7 @@ cmdRunParser = CmdRun
     <$> optional (textOption $ O.short 'e' <> O.long "env" <> O.metavar ":env" <> O.help "Environment name")
     <*> (O.flag UseSecrets NoSecrets $ O.short 'n' <> O.long "no-secrets" <> O.help "No secrets")
     <*> (O.flag NoStack UseStack $ O.short 's' <> O.long "stack" <> O.help "Use stack exec")
+    <*> (O.flag NoNewRun UseNewRun $ O.short 'r' <> O.long "new-run" <> O.help "Use cabal new-run")
     <*> (O.flag NoCabal UseCabal $ O.short 'c' <> O.long "cabal" <> O.help "Run first executable from cabal file")
     <*> many (O.strArgument $ O.metavar ":command" <> O.help "Command to run")
 
@@ -201,8 +205,8 @@ execCmd :: Opts -> IO ()
 execCmd (Opts cmd) = f $ case cmd of
     CmdEnv envName useSecrets ->
         execCmdEnv envName useSecrets
-    CmdRun envName useSecrets useStack useCabal params ->
-        execCmdRun envName useSecrets useStack useCabal params
+    CmdRun envName useSecrets useStack useNewRun useCabal params ->
+        execCmdRun envName useSecrets useStack useNewRun useCabal params
     CmdInit        -> execCmdInit
     CmdListKeys    -> execCmdListKeys
     CmdAddKey k v  -> execCmdAddKey k v
@@ -226,8 +230,8 @@ execCmdEnv envName' useSecrets = do
     void $ for_ (sort $ HM.toList env) $ \(k, v) ->
         liftIO $ T.putStrLn $ "export " <> k <> "=\"" <> v <> "\""
 
-execCmdRun :: Maybe EnvName -> UseSecrets -> UseStack -> UseCabal -> [String] -> Tajna ()
-execCmdRun envName' useSecrets useStack useCabal params = do
+execCmdRun :: Maybe EnvName -> UseSecrets -> UseStack -> UseNewRun -> UseCabal -> [String] -> Tajna ()
+execCmdRun envName' useSecrets useStack useNewRun useCabal params = do
     (env, rtsopts) <- getTajnaEnv useSecrets envName'
     origEnv <- getEnvironment'
     let env' = bimap T.unpack T.unpack <$> HM.toList (env <> origEnv)
@@ -244,9 +248,10 @@ execCmdRun envName' useSecrets useStack useCabal params = do
             ws -> "+RTS" : map T.unpack ws ++ "-RTS" : args'
 
     -- If use stack: prepend `stack exec`
-    let (cmd, args) = case useStack of
-            UseStack -> ("stack", "exec" : "--" : cmd' : args'')
-            NoStack  -> (cmd', args'')
+    let (cmd, args) = case (useNewRun, useStack) of
+            (UseNewRun, _)      -> ("cabal", "new-run" : "--" : cmd' : args'')
+            (_, UseStack)       -> ("stack", "exec" : "--" : cmd' : args'')
+            (NoNewRun, NoStack) -> (cmd', args'')
 
     -- Run command
     liftIO $ callProcessInEnv cmd args env'
