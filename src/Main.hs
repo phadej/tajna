@@ -3,17 +3,16 @@
 {-# LANGUAGE TemplateHaskell   #-}
 module Main (main) where
 
-import Prelude ()
-import Prelude.Compat
 import Control.Applicative        (many, optional, some, (<|>))
 import Control.Lens
        (at, forOf_, makeLenses, (%~), (&), (.~), (^.), _Wrapped)
-import Control.Monad              (void)
+import Control.Monad              (replicateM_, void)
 import Control.Monad.Catch        (catch)
 import Control.Monad.Catch        (throwM)
 import Control.Monad.CryptoRandom
-       (CRand, GenError, MonadCRandomR (..), evalCRand, newGenIO)
+       (CRandT, GenError, MonadCRandomR (..), evalCRandT, newGenIO)
 import Control.Monad.IO.Class     (MonadIO (..))
+import Control.Monad.Trans.Class  (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Crypto.Random.DRBG         (HmacDRBG)
 import Data.Aeson
@@ -32,6 +31,8 @@ import Data.Proxy                 (Proxy (..))
 import Data.Text                  (Text)
 import Data.Text.Lens             (unpacked)
 import Data.Yaml                  (decodeEither', encode)
+import Prelude ()
+import Prelude.Compat
 import System.Directory           (getDirectoryContents)
 import System.Environment         (getEnv, getEnvironment)
 import System.Exit                (ExitCode (..), exitFailure)
@@ -39,15 +40,14 @@ import System.Exit.Lens           (_ExitFailure)
 import System.IO                  (stderr)
 import System.Process             (createProcess, proc, waitForProcess)
 
-
 import Text.Regex.Applicative.Text (RE', psym, replace, sym)
 
-import Distribution.PackageDescription       (GenericPackageDescription (..))
-import Distribution.Verbosity                (normal)
+import Distribution.PackageDescription (GenericPackageDescription (..))
+import Distribution.Verbosity          (normal)
 
 #if MIN_VERSION_Cabal(2,0,0)
+import Distribution.PackageDescription.Parse  (readGenericPackageDescription)
 import Distribution.Types.UnqualComponentName (unUnqualComponentName)
-import Distribution.PackageDescription.Parse (readGenericPackageDescription)
 #else
 import Distribution.PackageDescription.Parse (readPackageDescription)
 #endif
@@ -282,15 +282,18 @@ execCmdGenPass :: Tajna ()
 execCmdGenPass = liftIO $ generatePassword 32
   where
     chars :: String
-    chars = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ "!@#?-_,."
+    chars = -- ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ "!@#?-_,."
+        "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
     generatePassword :: Int -> IO ()
     generatePassword l = do
         g <- newGenIO :: IO HmacDRBG
-        p <- either throwM pure $ evalCRand (generatePassword' l) $ g
-        putStrLn p
+        e <- flip evalCRandT g $ replicateM_ 16 $ do
+            p <- generatePassword' l
+            lift $ putStrLn p
+        either throwM pure e
 
-    generatePassword' :: Int -> CRand HmacDRBG GenError String
+    generatePassword' :: Int -> CRandT HmacDRBG GenError IO String
     generatePassword' l = sequence $ replicate l (element chars)
 
     element :: MonadCRandomR e m => [a] -> m a
