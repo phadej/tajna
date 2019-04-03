@@ -6,13 +6,12 @@ module Main (main) where
 import Control.Applicative        (many, optional, some, (<|>))
 import Control.Lens
        (at, forOf_, makeLenses, (%~), (&), (.~), (^.), _Wrapped)
-import Control.Monad              (replicateM_, void)
+import Control.Monad              (void)
 import Control.Monad.Catch        (catch)
 import Control.Monad.Catch        (throwM)
 import Control.Monad.CryptoRandom
-       (CRandT, GenError, MonadCRandomR (..), evalCRandT, newGenIO)
+       (CRand, GenError, getCRandom, MonadCRandomR (..), evalCRand, newGenIO)
 import Control.Monad.IO.Class     (MonadIO (..))
-import Control.Monad.Trans.Class  (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Crypto.Random.DRBG         (HmacDRBG)
 import Data.Aeson
@@ -42,17 +41,14 @@ import System.Process             (createProcess, proc, waitForProcess)
 
 import Text.Regex.Applicative.Text (RE', psym, replace, sym)
 
-import Distribution.PackageDescription (GenericPackageDescription (..))
-import Distribution.Verbosity          (normal)
-
-#if MIN_VERSION_Cabal(2,0,0)
-import Distribution.PackageDescription.Parse  (readGenericPackageDescription)
+import Distribution.PackageDescription        (GenericPackageDescription (..))
+import Distribution.PackageDescription.Parsec (readGenericPackageDescription)
+import Distribution.Verbosity                 (normal)
 import Distribution.Types.UnqualComponentName (unUnqualComponentName)
-#else
-import Distribution.PackageDescription.Parse (readPackageDescription)
-#endif
 
+import qualified System.POSIX.Crypt.SHA512 as Crypt
 import qualified Data.ByteString           as BS
+import qualified Data.ByteString.Char8     as BS8
 import qualified Data.HashMap.Strict       as HM
 import qualified Data.Text                 as T
 import qualified Data.Text.IO              as T
@@ -283,18 +279,22 @@ execCmdGenPass = liftIO $ generatePassword 32
   where
     chars :: String
     chars = -- ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ "!@#?-_,."
-        "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        "._0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
     generatePassword :: Int -> IO ()
     generatePassword l = do
         g <- newGenIO :: IO HmacDRBG
-        e <- flip evalCRandT g $ replicateM_ 16 $ do
-            p <- generatePassword' l
-            lift $ putStrLn p
-        either throwM pure e
+        (password, salt) <- either throwM pure $ evalCRand (generatePassword' l) $ g
+        let bsPassword = BS8.pack password
+        let crypted = Crypt.cryptSHA512' Nothing bsPassword salt
+        putStrLn $ "password: " ++ password
+        putStrLn $ "crypted:  " ++ BS8.unpack crypted
+        putStrLn $ "x-check:  " ++ maybe "<error>" BS8.unpack (Crypt.cryptSHA512 bsPassword crypted)
 
-    generatePassword' :: Int -> CRandT HmacDRBG GenError IO String
-    generatePassword' l = sequence $ replicate l (element chars)
+    generatePassword' :: Int -> CRand HmacDRBG GenError (String, BS.ByteString)
+    generatePassword' l = (\p e -> (p, BS.pack e))
+        <$> sequence (replicate l (element chars))
+        <*> sequence (replicate 6 getCRandom)
 
     element :: MonadCRandomR e m => [a] -> m a
     element list = (list !!) <$> getCRandomR (0, length list - 1)
@@ -427,11 +427,7 @@ findCabalFile = do
 
 cabalFileFirstExecutable :: MonadIO m => FilePath -> m (Maybe String)
 cabalFileFirstExecutable cabalFile = do
-#if MIN_VERSION_Cabal(2,0,0)
     gpd <- liftIO $ readGenericPackageDescription normal cabalFile
-#else
-    gpd <- liftIO $ readPackageDescription normal cabalFile
-#endif
     case condExecutables gpd of
         ((name, _) : _) ->
 #if MIN_VERSION_Cabal(2,0,0)

@@ -1,6 +1,11 @@
 resolver: nightly-2017-06-01
 packages:
 - '.'
-extra-deps: []
+- extra-dep: true
+  location:
+    git: git@github.com:phadej/crypt-sha256.git
+    commit: caf34be806979d7f46358501837f74fecf7923e9
+extra-deps:
+- cryptohash-sha512-0.11.100.1
 flags: {}
 extra-package-dbs: []

@@ -30,11 +30,12 @@ executable tajna
       src
   ghc-options: -Wall
   build-depends:
-      base >=4.7 && <4.11
+      base >=4.7 && <4.13
     , aeson >=1.0
     , base-compat
     , bytestring
-    , Cabal
+    , Cabal >=2.2
+    , crypt-sha512
     , directory
     , DRBG
     , exceptions
